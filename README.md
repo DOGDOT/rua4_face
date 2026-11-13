@@ -33,6 +33,15 @@ rua4_face/
 │       └── create3_nodes.launch.py
 ├── config/rviz/rua4_sim.rviz
 └── results/
+    ├── latest_happy.jpg              # Ảnh kết quả HUD biểu cảm Happy (Vui vẻ)
+    ├── latest_sad.jpg                # Ảnh kết quả HUD biểu cảm Sad (Buồn)
+    ├── latest_neutral.jpg            # Ảnh kết quả HUD biểu cảm Neutral (Bình thường)
+    ├── latest_angry.jpg              # Ảnh kết quả HUD biểu cảm Angry (Tức giận)
+    ├── latest_surprise.jpg           # Ảnh kết quả HUD biểu cảm Surprise (Ngạc nhiên)
+    ├── latest_fear.jpg               # Ảnh kết quả HUD biểu cảm Fear (Sợ hãi)
+    ├── lab8_gazebo_rviz.png          # Ảnh mô phỏng Gazebo Ignition + RViz2
+    ├── lab8_gazebo_trajectories.png  # Đồ thị quỹ đạo kiểm thử 06 biểu cảm
+    └── lab8_verification_report.txt  # Báo cáo số liệu kiểm thử định lượng Gazebo
 ```
 
 ---
