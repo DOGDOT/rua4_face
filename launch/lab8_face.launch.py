@@ -148,8 +148,8 @@ def generate_launch_description():
     )
     detector_backend_arg = DeclareLaunchArgument(
         'detector_backend',
-        default_value='opencv',
-        description='Backend dò khuôn mặt của DeepFace (mặc định: opencv)',
+        default_value='yunet',
+        description='Backend dò khuôn mặt của DeepFace (mặc định: yunet)',
     )
     min_confidence_arg = DeclareLaunchArgument(
         'min_confidence',

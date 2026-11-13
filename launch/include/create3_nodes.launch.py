@@ -112,8 +112,27 @@ def generate_launch_description():
         output='screen',
     )
 
+    # Xuất trạng thái cho wheel_drop_left_joint / wheel_drop_right_joint (không có trong ros2_control)
+    # và hòa đồng bộ với left_wheel_joint / right_wheel_joint từ joint_state_broadcaster.
+    joint_state_publisher_node = Node(
+        package='joint_state_publisher',
+        name='joint_state_publisher',
+        executable='joint_state_publisher',
+        parameters=[{
+            'use_sim_time': True,
+            'source_list': ['joint_states'],
+            'rate': 30,
+        }],
+        remappings=[
+            ('/tf', 'tf'),
+            ('/tf_static', 'tf_static'),
+        ],
+        output='screen',
+    )
+
     ld = LaunchDescription(ARGUMENTS)
     ld.add_action(diffdrive_controller)
+    ld.add_action(joint_state_publisher_node)
     ld.add_action(hazards_vector_node)
     ld.add_action(ir_intensity_vector_node)
     ld.add_action(motion_control_node)

@@ -163,7 +163,7 @@ class EmotionRecognitionNode(Node):
             self.get_parameter('status_topic').value or '/face_control_status'
         ).strip()
         self.detector_backend: str = str(
-            self.get_parameter('detector_backend').value or 'opencv'
+            self.get_parameter('detector_backend').value or 'yunet'
         ).strip()
         self.min_confidence: float = min(
             1.0, max(0.0, self._parse_float(self.get_parameter('min_confidence').value, 0.40))
@@ -174,6 +174,48 @@ class EmotionRecognitionNode(Node):
         self.infer_interval_sec: float = max(
             0.02, self._parse_float(self.get_parameter('infer_interval_sec').value, 0.15)
         )
+        # Tham số Focus ROI & lọc người phía trước camera (tránh phân tích người xung quanh)
+        import sys as _sys
+        _focus_defaults = {
+            'focus_center_only': ('--no-focus-center' not in _sys.argv),
+            'focus_roi_width': 0.66,
+            'focus_roi_height': 0.84,
+            'min_face_height_ratio': 0.16,
+            'min_face_confidence': 0.65,
+            'auto_save_results': ('--no-auto-save' not in _sys.argv),
+            'auto_save_interval_sec': 2.0,
+        }
+        for _pname, _pval in _focus_defaults.items():
+            if not self.has_parameter(_pname):
+                self.declare_parameter(_pname, _pval)
+        self.focus_center_only: bool = bool(self.get_parameter('focus_center_only').value)
+        self.focus_roi_width: float = min(
+            1.0, max(0.25, self._parse_float(self.get_parameter('focus_roi_width').value, 0.66))
+        )
+        self.focus_roi_height: float = min(
+            1.0, max(0.25, self._parse_float(self.get_parameter('focus_roi_height').value, 0.84))
+        )
+        self.min_face_height_ratio: float = min(
+            0.80, max(0.05, self._parse_float(self.get_parameter('min_face_height_ratio').value, 0.16))
+        )
+        self.min_face_confidence: float = min(
+            1.0, max(0.0, self._parse_float(self.get_parameter('min_face_confidence').value, 0.65))
+        )
+        self.auto_save_results: bool = self._parse_bool(
+            self.get_parameter('auto_save_results').value, True
+        )
+        self.auto_save_interval_sec: float = max(
+            0.5, self._parse_float(self.get_parameter('auto_save_interval_sec').value, 2.0)
+        )
+        self._last_auto_save_time: float = 0.0
+        self._last_auto_saved_emotion: str = ''
+        self._emotion_model: Any = None
+        self._tracked_face_center: Optional[Tuple[float, float]] = None
+        self._tracked_face_time: float = 0.0
+        self._latest_ignored_boxes: List[Tuple[int, int, int, int]] = []
+        self._latest_focus_roi: Optional[Tuple[int, int, int, int]] = None
+        if self.detector_backend == 'yunet':
+            os.environ.setdefault('yunet_score_threshold', '0.75')
         self.show_window: bool = self._parse_bool(
             self.get_parameter('show_window').value, True
         )
@@ -465,41 +507,229 @@ class EmotionRecognitionNode(Node):
 
         return 'none', 0.0
 
+    def _get_emotion_model(self) -> Any:
+        """Tải và cache mô hình Emotion ONNX của DeepFace để suy luận chỉ 1 khuôn mặt chính."""
+        if self._emotion_model is None:
+            from deepface.modules import modeling
+            self._emotion_model = modeling.build_model(
+                task='facial_attribute', model_name='Emotion'
+            )
+        return self._emotion_model
+
+    def _compute_focus_roi(self, frame_w: int, frame_h: int) -> Tuple[int, int, int, int]:
+        """Tính vùng Focus ROI trung tâm phía trước camera."""
+        roi_w = int(round(frame_w * self.focus_roi_width))
+        roi_h = int(round(frame_h * self.focus_roi_height))
+        x1 = max(0, (frame_w - roi_w) // 2)
+        x2 = min(frame_w, x1 + roi_w)
+        cy = int(round(frame_h * 0.49))
+        y1 = max(0, cy - roi_h // 2)
+        y2 = min(frame_h, y1 + roi_h)
+        return (x1, y1, x2, y2)
+
+    def _select_foreground_face(
+        self,
+        face_objs: List[Dict[str, Any]],
+        frame_w: int,
+        frame_h: int,
+        now: float,
+    ) -> Tuple[Optional[Dict[str, Any]], List[Tuple[int, int, int, int]], Tuple[int, int, int, int]]:
+        """Lọc bỏ người xung quanh/nền xa và chọn đúng 1 khuôn mặt chính trước camera."""
+        roi = self._compute_focus_roi(frame_w, frame_h)
+        roi_x1, roi_y1, roi_x2, roi_y2 = roi
+        min_face_h = max(36, int(round(frame_h * self.min_face_height_ratio)))
+        diag = max(1.0, float((frame_w ** 2 + frame_h ** 2) ** 0.5))
+
+        valid_boxes: List[Tuple[Dict[str, Any], Tuple[int, int, int, int], float, float]] = []
+        ignored_boxes: List[Tuple[int, int, int, int]] = []
+
+        for obj in face_objs:
+            if not isinstance(obj, dict):
+                continue
+            fa = obj.get('facial_area') or {}
+            try:
+                fx = int(fa.get('x', 0))
+                fy = int(fa.get('y', 0))
+                fw = int(fa.get('w', 0))
+                fh = int(fa.get('h', 0))
+                fconf = float(obj.get('confidence', 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+
+            if fw <= 0 or fh <= 0:
+                continue
+            # Bỏ qua bounding box giả toàn khung hình khi enforce_detection không bắt được mặt
+            if fconf == 0.0 and fw >= frame_w - 2 and fh >= frame_h - 2:
+                continue
+
+            box = (fx, fy, fw, fh)
+            if fconf > 0.0 and fconf < self.min_face_confidence:
+                ignored_boxes.append(box)
+                continue
+
+            cx = fx + 0.5 * fw
+            cy = fy + 0.5 * fh
+
+            if self.focus_center_only:
+                in_roi = (roi_x1 <= cx <= roi_x2) and (roi_y1 <= cy <= roi_y2)
+                big_enough = (fh >= min_face_h) and (fw >= int(round(min_face_h * 0.72)))
+                if not (in_roi and big_enough):
+                    ignored_boxes.append(box)
+                    continue
+
+            valid_boxes.append((obj, box, cx, cy))
+
+        if not valid_boxes:
+            if now - self._tracked_face_time > 1.0:
+                self._tracked_face_center = None
+            return None, ignored_boxes, roi
+
+        # Loại thêm người đứng sát phía sau vai (diện tích < 45% khuôn mặt lớn nhất trong Focus ROI)
+        max_area = max(box[2] * box[3] for _, box, _, _ in valid_boxes)
+        primary_pool = []
+        for entry in valid_boxes:
+            _, box, _, _ = entry
+            if (box[2] * box[3]) < 0.45 * max_area:
+                ignored_boxes.append(box)
+            else:
+                primary_pool.append(entry)
+
+        if not primary_pool:
+            primary_pool = valid_boxes
+
+        track_active = (
+            self._tracked_face_center is not None and (now - self._tracked_face_time) <= 1.0
+        )
+
+        def candidate_score(entry: Tuple[Dict[str, Any], Tuple[int, int, int, int], float, float]) -> float:
+            _, box, cx, cy = entry
+            area = float(box[2] * box[3])
+            dx = (cx / max(1, frame_w)) - 0.5
+            dy = (cy / max(1, frame_h)) - 0.49
+            center_weight = float(np.exp(-4.0 * (dx * dx + dy * dy)))
+            track_bonus = 1.0
+            if track_active and self._tracked_face_center is not None:
+                tx, ty = self._tracked_face_center
+                dist_norm = float(((cx - tx) ** 2 + (cy - ty) ** 2) ** 0.5) / diag
+                if dist_norm <= 0.16:
+                    track_bonus = 1.35
+            return area * center_weight * track_bonus
+
+        best_entry = max(primary_pool, key=candidate_score)
+        best_obj, best_box, best_cx, best_cy = best_entry
+        for entry in primary_pool:
+            if entry is not best_entry:
+                ignored_boxes.append(entry[1])
+
+        self._tracked_face_center = (best_cx, best_cy)
+        self._tracked_face_time = now
+        return best_obj, ignored_boxes, roi
+
     def _analyze_bgr_frame(
         self, frame_bgr: np.ndarray
     ) -> Tuple[str, float, Dict[str, float], Optional[Tuple[int, int, int, int]]]:
-        """Chạy DeepFace.analyze trên ảnh BGR và lọc còn 06 biểu cảm hợp lệ."""
+        """Dò khuôn mặt, lọc đúng người chính trước camera, rồi chạy DeepFace Emotion ONNX."""
+        from deepface.modules import detection, preprocessing
+        from deepface.models.demography.DemographyUtils import EMOTION_LABELS
+
         empty_scores = {emo: 0.0 for emo in VALID_EMOTIONS}
+        frame_h, frame_w = frame_bgr.shape[:2]
+        now = time.monotonic()
+        roi = self._compute_focus_roi(frame_w, frame_h)
+        self._latest_focus_roi = roi
+
+        if self.detector_backend == 'yunet':
+            os.environ.setdefault('yunet_score_threshold', '0.75')
+
+        face_objs: List[Dict[str, Any]] = []
         try:
-            analysis = DeepFace.analyze(
+            face_objs = detection.extract_faces(
                 img_path=frame_bgr,
-                actions=['emotion'],
                 detector_backend=self.detector_backend,
                 enforce_detection=True,
-                silent=True,
+                align=True,
+                expand_percentage=0,
+                color_face='bgr',
+                normalize_face=True,
             )
         except ValueError:
-            # Không phát hiện thấy khuôn mặt trong khung hình
+            self._latest_ignored_boxes = []
+            if now - self._tracked_face_time > 1.0:
+                self._tracked_face_center = None
             return 'none', 0.0, empty_scores, None
         except Exception as exc:
+            if self.detector_backend != 'opencv':
+                self.get_logger().warn(
+                    f'Backend {self.detector_backend} lỗi ({exc}) -> chuyển dự phòng sang opencv.'
+                )
+                self.detector_backend = 'opencv'
+                try:
+                    face_objs = detection.extract_faces(
+                        img_path=frame_bgr,
+                        detector_backend='opencv',
+                        enforce_detection=True,
+                        align=True,
+                        expand_percentage=0,
+                        color_face='bgr',
+                        normalize_face=True,
+                    )
+                except ValueError:
+                    self._latest_ignored_boxes = []
+                    return 'none', 0.0, empty_scores, None
+                except Exception as exc2:
+                    self.get_logger().warn(
+                        f'Lỗi suy luận DeepFace ({exc2})',
+                        throttle_duration_sec=3.0,
+                    )
+                    self._latest_ignored_boxes = []
+                    return 'none', 0.0, empty_scores, None
+            else:
+                self.get_logger().warn(
+                    f'Lỗi suy luận DeepFace ({exc})',
+                    throttle_duration_sec=3.0,
+                )
+                self._latest_ignored_boxes = []
+                return 'none', 0.0, empty_scores, None
+
+        selected, ignored_boxes, roi = self._select_foreground_face(
+            face_objs, frame_w, frame_h, now
+        )
+        self._latest_ignored_boxes = ignored_boxes
+        self._latest_focus_roi = roi
+
+        if selected is None:
+            return 'none', 0.0, empty_scores, None
+
+        crop_bgr = selected.get('face')
+        if crop_bgr is None or getattr(crop_bgr, 'size', 0) == 0:
+            return 'none', 0.0, empty_scores, None
+
+        try:
+            emo_model = self._get_emotion_model()
+            crop_resized = preprocessing.resize_image(img=crop_bgr, target_size=(224, 224))
+            predictions = emo_model.predict(crop_resized)
+            pred_sum = float(np.sum(predictions))
+            if pred_sum <= 0.0:
+                raw_scores_dict = {lbl: 0.0 for lbl in EMOTION_LABELS}
+            else:
+                raw_scores_dict = {
+                    EMOTION_LABELS[i]: float(100.0 * predictions[i] / pred_sum)
+                    for i in range(len(EMOTION_LABELS))
+                }
+        except Exception as exc:
             self.get_logger().warn(
-                f'Lỗi suy luận DeepFace ({exc})',
+                f'Lỗi mô hình Emotion ONNX ({exc})',
                 throttle_duration_sec=3.0,
             )
             return 'none', 0.0, empty_scores, None
 
-        face_item = self._select_primary_face(analysis)
-        if face_item is None:
-            return 'none', 0.0, empty_scores, None
-
-        raw_scores_dict = face_item.get('emotion') or {}
         scores_6 = self._normalize_scores(raw_scores_dict)
 
         # Lọc bỏ 'disgust': chọn biểu cảm cao nhất trong 06 lớp hợp lệ
         best_valid = max(VALID_EMOTIONS, key=lambda emo: scores_6[emo])
         best_conf = scores_6[best_valid]
 
-        reg = face_item.get('region') or {}
+        reg = selected.get('facial_area') or {}
         face_box: Optional[Tuple[int, int, int, int]] = None
         try:
             fx = int(reg.get('x', 0))
@@ -677,12 +907,65 @@ class EmotionRecognitionNode(Node):
                 cv2.LINE_AA,
             )
 
+        # 2b. Vẽ khung Focus Zone trung tâm và đánh dấu các khuôn mặt xung quanh bị bỏ qua
+        ignored_boxes = state.get('ignored_boxes') or []
+        for bx, by, bw, bh in ignored_boxes:
+            ix1 = max(2, bx)
+            iy1 = max(header_h + 2, by)
+            ix2 = min(w - 2, bx + bw)
+            iy2 = min(h - footer_h - 2, by + bh)
+            if ix2 > ix1 + 6 and iy2 > iy1 + 6:
+                cv2.rectangle(canvas, (ix1, iy1), (ix2, iy2), (125, 130, 140), 1)
+                cv2.putText(
+                    canvas,
+                    'BG (Ignored)',
+                    (ix1, max(header_h + 13, iy1 - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.38,
+                    (175, 180, 190),
+                    1,
+                    cv2.LINE_AA,
+                )
+
+        if self.focus_center_only:
+            focus_roi = state.get('focus_roi') or self._compute_focus_roi(w, h)
+            rx1, ry1, rx2, ry2 = focus_roi
+            rx1 = max(6, rx1)
+            ry1 = max(header_h + 6, ry1)
+            rx2 = min(w - 6, rx2)
+            ry2 = min(h - footer_h - 6, ry2)
+            if rx2 > rx1 + 40 and ry2 > ry1 + 40:
+                roi_color = (95, 220, 155) if face_box is not None else (95, 175, 235)
+                b_len = 18
+                for cx0, cy0, sx, sy in (
+                    (rx1, ry1, 1, 1),
+                    (rx2, ry1, -1, 1),
+                    (rx1, ry2, 1, -1),
+                    (rx2, ry2, -1, -1),
+                ):
+                    cv2.line(canvas, (cx0, cy0), (cx0 + sx * b_len, cy0), roi_color, 1, cv2.LINE_AA)
+                    cv2.line(canvas, (cx0, cy0), (cx0, cy0 + sy * b_len), roi_color, 1, cv2.LINE_AA)
+                cv2.putText(
+                    canvas,
+                    'FOCUS ZONE (Primary User)',
+                    (rx1 + 6, ry1 + 15),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.40,
+                    roi_color,
+                    1,
+                    cv2.LINE_AA,
+                )
+
         # 3. Nội dung Header trên cùng
         conf_pct = confidence * 100.0 if emotion != 'none' else 0.0
         header_title = (
             f'Emotion: {en_label} ({vn_label})  -  {conf_pct:.1f}%'
             if emotion != 'none'
-            else 'Emotion: None (Dang cho bieu cam ro net)'
+            else (
+                'Emotion: None (Dua mat vao vung Focus)'
+                if self.focus_center_only and face_box is None
+                else 'Emotion: None (Dang cho bieu cam ro net)'
+            )
         )
         cv2.putText(
             canvas,
@@ -798,10 +1081,40 @@ class EmotionRecognitionNode(Node):
 
         return canvas
 
-    def _save_snapshot(self, annotated_frame: np.ndarray, emotion: str, now: float) -> None:
-        """Lưu khung hình đã chú thích HUD xuống thư mục results_dir."""
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
+    def _save_snapshot(
+        self, annotated_frame: np.ndarray, emotion: str, now: float, auto: bool = False
+    ) -> None:
+        """Lưu khung hình đã chú thích HUD xuống thư mục results_dir (thủ công hoặc tự động)."""
         safe_emo = emotion if emotion in VALID_EMOTIONS else 'none'
+        if auto:
+            filename = f'latest_{safe_emo}.jpg'
+            tmp_path = os.path.join(self.results_dir, f'.tmp_{filename}')
+            out_path = os.path.join(self.results_dir, filename)
+            try:
+                os.makedirs(self.results_dir, exist_ok=True)
+                ok = cv2.imwrite(tmp_path, annotated_frame)
+                if ok:
+                    os.replace(tmp_path, out_path)
+                    emotion_changed = safe_emo != self._last_auto_saved_emotion
+                    self._last_auto_saved_emotion = safe_emo
+                    self._last_auto_save_time = now
+                    self.toast_message = f'Auto-saved: {filename}'
+                    self.toast_until = now + 1.5
+                    if emotion_changed:
+                        self.get_logger().info(f'Đã tự cập nhật ảnh kết quả: {out_path}')
+                else:
+                    self.get_logger().warn(
+                        f'Không thể ghi ảnh auto-save vào: {out_path}',
+                        throttle_duration_sec=5.0,
+                    )
+            except Exception as exc:
+                self.get_logger().warn(
+                    f'Lỗi auto-save ảnh kết quả ({exc})',
+                    throttle_duration_sec=5.0,
+                )
+            return
+
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:-3]
         filename = f'emotion_{safe_emo}_{ts}.jpg'
         out_path = os.path.join(self.results_dir, filename)
         try:
@@ -842,6 +1155,8 @@ class EmotionRecognitionNode(Node):
                 'scores': dict(self._latest_result['scores']),
                 'face_box': self._latest_result['face_box'],
                 'infer_ms': self._latest_result['infer_ms'],
+                'ignored_boxes': list(self._latest_ignored_boxes),
+                'focus_roi': self._latest_focus_roi,
             }
 
         stable_emotion: str = state['emotion']
@@ -880,8 +1195,21 @@ class EmotionRecognitionNode(Node):
         elif stable_emotion == 'none':
             self.last_logged_emotion = 'none'
 
-        if self.show_window:
+        should_auto_save = (
+            self.auto_save_results
+            and stable_emotion in VALID_EMOTIONS
+            and (
+                stable_emotion != self._last_auto_saved_emotion
+                or (now - self._last_auto_save_time) >= self.auto_save_interval_sec
+            )
+        )
+        annotated: Optional[np.ndarray] = None
+        if self.show_window or should_auto_save:
             annotated = self._draw_hud(frame, state, now)
+        if should_auto_save and annotated is not None:
+            self._save_snapshot(annotated, stable_emotion, now, auto=True)
+
+        if self.show_window and annotated is not None:
             try:
                 cv2.imshow(self.window_name, annotated)
                 key = cv2.waitKey(1) & 0xFF
@@ -894,7 +1222,7 @@ class EmotionRecognitionNode(Node):
                     if rclpy.ok():
                         rclpy.shutdown()
                 elif key in (ord('s'), ord('S')):
-                    self._save_snapshot(annotated, stable_emotion, now)
+                    self._save_snapshot(annotated, stable_emotion, now, auto=False)
             except Exception as exc:
                 self.get_logger().warn(
                     f'Không thể mở cửa sổ cv2.imshow ({exc}) -> Chuyển sang chế độ ẩn (headless).'
@@ -956,8 +1284,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         '--detector-backend',
         type=str,
-        default='opencv',
-        help='Backend phát hiện khuôn mặt của DeepFace (mặc định: opencv)',
+        default='yunet',
+        help='Backend phát hiện khuôn mặt của DeepFace (mặc định: yunet)',
+    )
+    parser.add_argument(
+        '--no-focus-center',
+        dest='focus_center_only',
+        action='store_false',
+        default=True,
+        help='Tắt bộ lọc Focus Zone trung tâm (mặc định: bật chỉ theo dõi người trước camera)',
     )
     parser.add_argument(
         '--min-confidence',
@@ -991,10 +1326,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help='Chạy ẩn không bật cửa sổ cv2.imshow',
     )
     parser.add_argument(
+        '--no-auto-save',
+        dest='auto_save_results',
+        action='store_false',
+        default=True,
+        help='Tắt tự động cập nhật file latest_<emotion>.jpg trong results/',
+    )
+    parser.add_argument(
         '--results-dir',
         type=str,
         default='',
-        help='Thư mục lưu ảnh chụp HUD khi nhấn phím S',
+        help='Thư mục tự động cập nhật latest_<emotion>.jpg và lưu ảnh khi nhấn phím S',
     )
 
     cleaned_argv = rclpy.utilities.remove_ros_args(args=argv)

@@ -16,3 +16,10 @@ log/
 *.toc
 baocao/
 bao_cao*
+
+# Ảnh webcam chụp tự động / thủ công cá nhân tại máy người dùng
+results/latest_*.jpg
+results/emotion_*.jpg
+results/.tmp_*.jpg
+
+
