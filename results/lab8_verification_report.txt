@@ -1,0 +1,45 @@
+========================================================================
+LAB 8 (rua4_face) IGNITION GAZEBO + ROS 2 HUMBLE VERIFICATION REPORT
+========================================================================
+Timestamp          : 2026-11-13 09:35:11
+World / Robot      : warehouse / TurtleBot 4 standard (spawn_dock=false)
+Sim Ready Info     : {'elapsed': 6.270127452999986, 'cmd_subs': 2, 'emo_subs': 1, 'odom_count': 67, 'cmd_count': 123, 'has_scan': True, 'front_min': 7.976287364959717, 'rear_min': 1.6803113222122192}
+Total Samples      : 4264
+Overall Result     : PASS
+
+--- PER-EMOTION CHECKS ---
+  [PASS] happy    : cmd=(+0.180, +0.550), s_fwd=+0.5007m, dyaw=+89.68deg (+1.565rad)
+  [PASS] sad      : cmd=(+0.180, -0.550), s_fwd=+0.5400m, dyaw=-82.58deg (-1.441rad)
+  [PASS] neutral  : tail_cmd=(+0.0000, +0.0000), tail_odom=(+0.0000, +0.0000)
+  [PASS] angry    : cmd=(-0.100, +0.000), s_fwd=-0.2277m, dyaw=+0.00deg
+  [PASS] surprise : cmd_wz_max=+1.000, dyaw=+363.71deg (+6.3480rad), tail_cmd_wz=+0.0000, tail_odom_wz=+0.0000
+  [PASS] fear     : cmd=(+0.100, +0.000), s_fwd=+0.2292m, dyaw=+0.00deg
+
+--- PHASE SUMMARY TABLE ---
+  warmup_neutral | dur=1.0s | s_fwd=-0.0000 m | dyaw=  +0.00 deg | cmd_mean=(+0.000, +0.000) | tail_cmd=(+0.000, +0.000) | tail_odom=(-0.000, +0.000) | status=NEUTRAL -> Dung tai cho
+  happy          | dur=3.0s | s_fwd=+0.5007 m | dyaw= +89.68 deg | cmd_mean=(+0.180, +0.550) | tail_cmd=(+0.180, +0.550) | tail_odom=(+0.180, +0.550) | status=HAPPY -> Quy dao cong sang trai
+  sad            | dur=3.0s | s_fwd=+0.5400 m | dyaw= -82.58 deg | cmd_mean=(+0.180, -0.550) | tail_cmd=(+0.180, -0.550) | tail_odom=(+0.180, -0.550) | status=SAD -> Quy dao cong sang phai
+  neutral        | dur=1.5s | s_fwd=+0.0480 m | dyaw=  -6.37 deg | cmd_mean=(+0.000, +0.000) | tail_cmd=(+0.000, +0.000) | tail_odom=(+0.000, +0.000) | status=NEUTRAL -> Dung tai cho
+  angry          | dur=2.5s | s_fwd=-0.2277 m | dyaw=  +0.00 deg | cmd_mean=(-0.100, +0.000) | tail_cmd=(-0.100, +0.000) | tail_odom=(-0.100, +0.000) | status=ANGRY -> Lui nhe ve phia sau
+  surprise       | dur=8.5s | s_fwd=-0.0207 m | dyaw=+363.71 deg | cmd_mean=(+0.000, +0.754) | tail_cmd=(+0.000, +0.000) | tail_odom=(+0.000, +0.000) | status=SURPRISE -> Hoan tat xoay 360 do (Stopped)
+  fear           | dur=2.5s | s_fwd=+0.2292 m | dyaw=  +0.00 deg | cmd_mean=(+0.100, +0.000) | tail_cmd=(+0.100, +0.000) | tail_odom=(+0.100, +0.000) | status=FEAR -> Tien nhe ve phia truoc
+  final_neutral  | dur=1.0s | s_fwd=+0.0207 m | dyaw=  +0.00 deg | cmd_mean=(+0.000, +0.000) | tail_cmd=(+0.000, +0.000) | tail_odom=(+0.000, +0.000) | status=NEUTRAL -> Dung tai cho
+
+--- STATUS TRANSITIONS ---
+  t_mono=4098.925 | IDLE -> Cho tin hieu khuon mat
+  t_mono=4105.192 | NEUTRAL -> Dung tai cho
+  t_mono=4106.202 | HAPPY -> Quy dao cong sang trai
+  t_mono=4109.205 | SAD -> Quy dao cong sang phai
+  t_mono=4112.210 | NEUTRAL -> Dung tai cho
+  t_mono=4113.710 | ANGRY -> Lui nhe ve phia sau
+  t_mono=4116.214 | SURPRISE -> Dang xoay 360 do (0/360 deg)
+  t_mono=4117.159 | SURPRISE -> Dang xoay 360 do (47/360 deg)
+  t_mono=4117.909 | SURPRISE -> Dang xoay 360 do (90/360 deg)
+  t_mono=4118.709 | SURPRISE -> Dang xoay 360 do (136/360 deg)
+  t_mono=4119.509 | SURPRISE -> Dang xoay 360 do (182/360 deg)
+  t_mono=4120.260 | SURPRISE -> Dang xoay 360 do (225/360 deg)
+  t_mono=4121.060 | SURPRISE -> Dang xoay 360 do (270/360 deg)
+  t_mono=4121.859 | SURPRISE -> Dang xoay 360 do (317/360 deg)
+  t_mono=4122.610 | SURPRISE -> Hoan tat xoay 360 do (Stopped)
+  t_mono=4124.716 | FEAR -> Tien nhe ve phia truoc
+  t_mono=4127.218 | NEUTRAL -> Dung tai cho
